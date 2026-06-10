@@ -1,36 +1,41 @@
 /* ============================================================
-   TUTROCITO FLIPBOOK ENGINE
-   Clean canvas-based page flip. Images loaded via fetch.
+   TUTROCITO FLIPBOOK — CSS 3D rotateY engine
+   
+   El navegador hace la perspectiva nativa. Sin canvas bugs.
+   60fps garantizado. El flip es un card con dos caras que 
+   rota en Y con transform-origin en el lomo.
    ============================================================ */
+'use strict';
 
-const cv  = document.getElementById('fc');
-const ctx = cv.getContext('2d');
-const A4  = 595.5 / 842.25; // page width/height ratio
+const A4 = 595.5 / 842.25;
 
-let curL  = 0;   // left page index
-let curR  = -1;  // right page index (-1 = none)
-let PW    = 0;   // single page width in px
-let PH    = 0;   // single page height in px
-let busy  = false;
-let zoomLv = 1.0;
+// ── State ───────────────────────────────────────────────────
+let curL    = 0;
+let curR    = -1;
+let PW      = 0;    // single page width px
+let PH      = 0;    // single page height px
+let busy    = false;
+let zoomLv  = 1;
 let thumbsOpen = false;
-let mobile = false;
+let mob     = false;
 
-/* ── Image cache ─────────────────────────────────────────── */
-const IMGS = {};
+// ── Image preloader ─────────────────────────────────────────
+const IMG_CACHE = {};
+function imgSrc(i) { return `pages/${String(i).padStart(2,'0')}.jpg`; }
 
 function loadImg(i) {
   if (i < 0 || i >= TOTAL) return Promise.resolve(null);
-  if (IMGS[i]) {
-    if (IMGS[i].complete && IMGS[i].naturalWidth) return Promise.resolve(IMGS[i]);
-    return new Promise(r => { IMGS[i].onload = () => r(IMGS[i]); IMGS[i].onerror = () => r(null); });
+  if (IMG_CACHE[i]) {
+    const m = IMG_CACHE[i];
+    if (m.complete && m.naturalWidth) return Promise.resolve(m);
+    return new Promise(r => m.addEventListener('load', () => r(m), { once: true }));
   }
   return new Promise(r => {
-    const m = new Image();
+    const m   = new Image();
     m.onload  = () => r(m);
     m.onerror = () => r(null);
-    m.src = `pages/${String(i).padStart(2,'0')}.jpg`;
-    IMGS[i] = m;
+    m.src     = imgSrc(i);
+    IMG_CACHE[i] = m;
   });
 }
 
@@ -38,468 +43,515 @@ function preload(...ids) {
   ids.filter(i => i >= 0 && i < TOTAL).forEach(i => loadImg(i));
 }
 
-/* ── Geometry ─────────────────────────────────────────────── */
-function checkMobile() {
-  mobile = window.innerWidth < 700;
-}
+// ── Elements ────────────────────────────────────────────────
+const elScene      = document.getElementById('scene');
+const elBook       = document.getElementById('book');
+const elStaticL    = document.getElementById('pageStaticL');
+const elStaticR    = document.getElementById('pageStaticR');
+const elFlipper    = document.getElementById('flipper');
+const elFlipFront  = document.getElementById('imgFlipFront');
+const elFlipBack   = document.getElementById('imgFlipBack');
+const elImgL       = document.getElementById('imgStaticL');
+const elImgR       = document.getElementById('imgStaticR');
+const elHsL        = document.getElementById('hsL');
+const elHsR        = document.getElementById('hsR');
+const elPeelR      = document.getElementById('peelR');
+const elPeelL      = document.getElementById('peelL');
 
-function calcSize() {
-  checkMobile();
+// ── Layout ──────────────────────────────────────────────────
+function checkMob() { mob = window.innerWidth < 700; }
+
+function layout() {
+  checkMob();
   const stage = document.getElementById('stage');
-  const aw = stage.offsetWidth  - (mobile ? 56 : 88);
-  const ah = stage.offsetHeight - (mobile ? 8  : 12);
-  const single = curR === -1 || mobile;
+  const aw = stage.offsetWidth  - (mob ? 52 : 88);
+  const ah = stage.offsetHeight - 12;
+  const single = curR === -1 || mob;
 
-  let pW, pH;
+  let pw, ph;
   if (single) {
-    pH = Math.min(ah, aw / A4);
-    pW = pH * A4;
-    if (pW > aw) { pW = aw; pH = pW / A4; }
+    ph = Math.min(ah, aw / A4); pw = ph * A4;
+    if (pw > aw) { pw = aw; ph = pw / A4; }
   } else {
-    pW = Math.min(aw / 2, ah * A4);
-    pH = pW / A4;
-    if (pH > ah) { pH = ah; pW = pH * A4; }
+    pw = Math.min(aw / 2, ah * A4); ph = pw / A4;
+    if (ph > ah) { ph = ah; pw = ph * A4; }
   }
 
-  PW = Math.round(pW * zoomLv);
-  PH = Math.round(pH * zoomLv);
+  PW = Math.round(pw * zoomLv);
+  PH = Math.round(ph * zoomLv);
 
-  const tw = single ? PW : PW * 2;
-  cv.width  = tw;
-  cv.height = PH;
+  // Size the page panels
+  const pageStyle = `width:${PW}px;height:${PH}px;`;
+  elStaticL.style.cssText += pageStyle;
+  elStaticR.style.cssText += pageStyle;
+  elFlipper.style.cssText += pageStyle;
 
-  const hl = document.getElementById('hl');
-  hl.style.width  = tw + 'px';
-  hl.style.height = PH + 'px';
+  // Book total width
+  const bookW = single ? PW : PW * 2;
+  elBook.style.width  = bookW + 'px';
+  elBook.style.height = PH + 'px';
+
+  // Spine shadow
+  const spine = elBook.querySelector('.spine-shadow');
+  if (single) {
+    spine.style.display = 'none';
+  } else {
+    spine.style.cssText = `
+      display:block;
+      position:absolute; top:0; bottom:0;
+      left:${PW - 14}px; width:28px;
+      background: linear-gradient(to right,
+        rgba(0,0,0,.25) 0%, rgba(0,0,0,.04) 35%,
+        rgba(255,255,255,.04) 50%,
+        rgba(0,0,0,.04) 65%, rgba(0,0,0,.25) 100%);
+      pointer-events:none; z-index:10;
+    `;
+  }
+
+  // Book shadow (floor shadow)
+  const bsh = elBook.parentElement.querySelector('.book-shadow');
+  if (bsh) bsh.style.width = bookW * 0.9 + 'px';
 }
 
 function getSpread(idx) {
   idx = Math.max(0, Math.min(idx, TOTAL - 1));
-  if (idx === 0 || mobile) return { l: idx, r: -1 };
+  if (idx === 0 || mob) return { l: idx, r: -1 };
   const l = idx % 2 === 1 ? idx : idx - 1;
   return { l, r: l + 1 < TOTAL ? l + 1 : -1 };
 }
 
 function setSpread(idx) {
   const s = getSpread(idx);
-  curL = s.l;
-  curR = s.r;
+  curL = s.l; curR = s.r;
 }
 
-/* ── Static render ────────────────────────────────────────── */
+// ── Render static spread ────────────────────────────────────
 async function render() {
-  calcSize();
-  ctx.clearRect(0, 0, cv.width, PH);
+  layout();
+  checkMob();
 
-  const iL = await loadImg(curL);
-  if (iL) ctx.drawImage(iL, 0, 0, PW, PH);
+  const single = curR === -1 || mob;
 
-  const single = curR === -1 || mobile;
+  // Left page
+  elImgL.src = imgSrc(curL);
+  elStaticL.style.display = 'block';
+  elStaticL.className = 'page-static left' + (single ? ' single' : '');
+
+  // Right page
   if (!single && curR !== -1) {
-    const iR = await loadImg(curR);
-    if (iR) ctx.drawImage(iR, PW, 0, PW, PH);
-    drawSpine();
+    elImgR.src = imgSrc(curR);
+    elStaticR.style.display = 'block';
+    elStaticR.className = 'page-static right';
+    // Position right page
+    elStaticR.style.position = 'absolute';
+    elStaticR.style.left = PW + 'px';
+    elStaticR.style.top  = '0';
+  } else {
+    elStaticR.style.display = 'none';
   }
+
+  // Hide flipper when static
+  elFlipper.style.display = 'none';
+  elFlipper.style.transform = '';
 
   buildHotspots();
   updateUI();
-  updateHints();
+  updatePeelHints();
   preload(curL - 1, curL + 1, curL + 2, curL + 3);
 }
 
-function drawSpine() {
-  const g = ctx.createLinearGradient(PW - 16, 0, PW + 16, 0);
-  g.addColorStop(0,    'rgba(0,0,0,0.28)');
-  g.addColorStop(0.38, 'rgba(0,0,0,0.05)');
-  g.addColorStop(0.5,  'rgba(255,255,255,0.05)');
-  g.addColorStop(0.62, 'rgba(0,0,0,0.05)');
-  g.addColorStop(1,    'rgba(0,0,0,0.28)');
-  ctx.fillStyle = g;
-  ctx.fillRect(PW - 16, 0, 32, PH);
-}
-
-/* ============================================================
-   FLIP ANIMATION
-
-   The page hinges at the spine and sweeps across.
-   We render it with horizontal foreshortening (cos of angle)
-   plus gradient shading to sell the 3D curl.
-
-   Frame layers (back → front):
-   1. Destination spread (full, revealed underneath)
-   2. Static source page (stays flat)
-   3. Turning page — foreshortened, shaded
-   4. Shadow cast on static page
-   5. Spine
-
-   angle 0→π: front face (0→π/2) then back face (π/2→π)
-   visW = |cos(angle)| * PW  — foreshortened width
-   ============================================================ */
-
-function easeInOutCubic(t) {
-  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-}
+// ── CSS 3D Page Flip ────────────────────────────────────────
+//
+// Technique:
+//   The .flipper div is positioned on top of the static page that turns.
+//   It has two faces: front (the page that turns) and back (destination page).
+//   We animate rotateY from 0° to -180° (next) or 0° to 180° (prev).
+//   transform-origin is set to the spine edge so it rotates around the correct axis.
+//   The static destination pages are revealed underneath as the flipper rotates.
+//   Gradient overlays on each face simulate lighting/shading.
+//
+//   Easing: cubic-bezier(0.645, 0.045, 0.355, 1.000) — smooth start, smooth end
+//
 
 async function flipPage(dir) {
   if (busy) return;
-  checkMobile();
+  checkMob();
 
-  const srcL = curL;
-  const srcR = mobile ? -1 : curR;
+  const srcL = curL, srcR = mob ? -1 : curR;
   const srcSingle = srcR === -1;
 
-  // Destination
   let dstL, dstR;
   if (dir === 'next') {
     const last = srcSingle ? srcL : srcR;
     if (last >= TOTAL - 1) return;
     const d = getSpread(last + 1);
-    dstL = d.l; dstR = mobile ? -1 : d.r;
+    dstL = d.l; dstR = mob ? -1 : d.r;
   } else {
     if (srcL <= 0) return;
     const d = getSpread(srcL - 1);
-    dstL = d.l; dstR = mobile ? -1 : d.r;
+    dstL = d.l; dstR = mob ? -1 : d.r;
   }
   const dstSingle = dstR === -1;
 
-  // Pages involved
+  // Which page flips, which stays static, what's on the back
   const flipIdx   = dir === 'next' ? (srcSingle ? srcL : srcR) : srcL;
   const staticIdx = dir === 'next' ? srcL : (srcSingle ? -1 : srcR);
   const backIdx   = dir === 'next' ? dstL : (dstR !== -1 ? dstR : dstL);
 
   busy = true;
-  buildHotspots(); // clear during animation
+  clearHotspots();
 
-  // Load all pages we need
-  await Promise.all(
-    [srcL, srcR, dstL, dstR, flipIdx, backIdx]
-      .filter(i => i >= 0 && i < TOTAL)
-      .map(i => loadImg(i))
-  );
+  // Pre-load flip + back images
+  await Promise.all([flipIdx, backIdx, dstL, dstR]
+    .filter(i => i >= 0 && i < TOTAL)
+    .map(loadImg));
 
-  calcSize();
+  layout();
 
-  // Canvas wide enough for both spreads
-  const tw = Math.max(srcSingle ? PW : PW * 2, dstSingle ? PW : PW * 2);
-  cv.width = tw; cv.height = PH;
-  document.getElementById('hl').style.width = tw + 'px';
+  // ── Set up the scene for this flip ──────────────────────────
 
-  // The hinge x — the fixed edge the page rotates around
-  // next → spine is left edge of the right-side page
-  // prev → spine is right edge of the left-side page
-  const spineX = dir === 'next'
-    ? (srcSingle ? 0 : PW)
-    : (srcSingle ? tw : PW);
+  // Static layer: show destination spread underneath
+  // Left static: src left page OR dst left page depending on direction
+  if (dir === 'next') {
+    // Under the flip: show dst left (left side)
+    // Static right stays as src left (it's on the left and doesn't move)
+    elImgL.src = imgSrc(srcSingle ? dstL : srcL);
+    elStaticL.style.display = 'block';
+    elStaticL.className = 'page-static left';
 
-  const DURATION = mobile ? 440 : 540;
-  let t0 = null;
-
-  const flipImg   = IMGS[flipIdx]  || null;
-  const backImg   = IMGS[backIdx]  || null;
-  const staticImg = staticIdx >= 0 ? (IMGS[staticIdx] || null) : null;
-  const dstLImg   = IMGS[dstL]    || null;
-  const dstRImg   = (dstR !== -1) ? (IMGS[dstR] || null) : null;
-
-  function frame(ts) {
-    if (!t0) t0 = ts;
-    const raw = Math.min((ts - t0) / DURATION, 1);
-    const t   = easeInOutCubic(raw);
-
-    // angle: 0 (flat) → π (fully flipped)
-    const angle = t * Math.PI;
-    const cosA  = Math.cos(angle);
-    const visW  = Math.abs(cosA) * PW;
-    const front = cosA >= 0; // front face visible?
-
-    ctx.clearRect(0, 0, tw, PH);
-
-    /* 1 — Destination spread underneath */
-    if (dstLImg?.complete) ctx.drawImage(dstLImg, 0, 0, PW, PH);
-    if (dstRImg?.complete) ctx.drawImage(dstRImg, PW, 0, PW, PH);
-
-    /* 2 — Static source page */
-    if (staticImg?.complete) {
-      const sx = dir === 'next' ? 0 : (srcSingle ? 0 : PW);
-      ctx.drawImage(staticImg, sx, 0, PW, PH);
-    }
-
-    /* 3 — Turning page */
-    if (visW > 0.5) {
-      const drawImg = front ? flipImg : backImg;
-
-      if (drawImg?.complete && drawImg.naturalWidth) {
-        // destX: left edge of the compressed page on canvas
-        // The spine edge is fixed; the free edge sweeps inward.
-        // next: page anchored at spineX on its left, shrinks rightward
-        //       so destX = spineX, right edge = spineX + visW
-        //       But the right side of the page is the free edge, so:
-        //       destX = spineX  (spine=left, free=right, page narrows from right)
-        //       Actually: spineX is LEFT edge, full page goes spineX → spineX+PW.
-        //       As it turns, it narrows toward spine, so destX stays at spineX.
-        // prev: page anchored at spineX on its right, shrinks leftward
-        //       destX = spineX - visW
-        const destX = dir === 'next' ? spineX : spineX - visW;
-
-        ctx.save();
-
-        // Clip to the half where this page lives
-        ctx.beginPath();
-        if (dir === 'next') {
-          ctx.rect(spineX, 0, tw - spineX, PH);
-        } else {
-          ctx.rect(0, 0, spineX, PH);
-        }
-        ctx.clip();
-
-        // Subtle vertical scale at fold peak (paper bows slightly)
-        const scaleY = 1.0 - Math.sin(angle) * 0.009;
-
-        if (front) {
-          ctx.save();
-          ctx.translate(destX + visW / 2, PH / 2);
-          ctx.scale(1, scaleY);
-          ctx.translate(-(destX + visW / 2), -PH / 2);
-          ctx.drawImage(drawImg, 0, 0, PW, PH, destX, 0, visW, PH);
-          ctx.restore();
-        } else {
-          // Back face: mirrored horizontally
-          ctx.save();
-          ctx.translate(destX + visW / 2, PH / 2);
-          ctx.scale(-1, scaleY);
-          ctx.translate(-(destX + visW / 2), -PH / 2);
-          ctx.drawImage(drawImg, 0, 0, PW, PH, destX, 0, visW, PH);
-          ctx.restore();
-        }
-
-        /* Shading — darkens at fold peak, bright on flat parts */
-        // sin(angle) peaks at 90° — that's the fold crease
-        const foldIntensity = Math.sin(angle); // 0 → 1 → 0
-
-        // front face: dark at spine edge, fades outward
-        // back face:  dark at free edge, fades inward
-        const shade = Math.pow(foldIntensity, 0.65) * (front ? 0.60 : 0.50);
-
-        if (shade > 0.01) {
-          const sg = ctx.createLinearGradient(destX, 0, destX + visW, 0);
-          if (dir === 'next') {
-            if (front) {
-              // Spine (dark) on left → free edge on right
-              sg.addColorStop(0,    `rgba(0,0,0,${shade})`);
-              sg.addColorStop(0.5,  `rgba(0,0,0,${shade * 0.22})`);
-              sg.addColorStop(1,    `rgba(0,0,0,0.01)`);
-            } else {
-              // Back face just past 90°: darkest at free edge (right)
-              sg.addColorStop(0,    `rgba(0,0,0,0.01)`);
-              sg.addColorStop(0.5,  `rgba(0,0,0,${shade * 0.22})`);
-              sg.addColorStop(1,    `rgba(0,0,0,${shade})`);
-            }
-          } else {
-            if (front) {
-              // Spine (dark) on right → free edge on left
-              sg.addColorStop(0,    `rgba(0,0,0,0.01)`);
-              sg.addColorStop(0.5,  `rgba(0,0,0,${shade * 0.22})`);
-              sg.addColorStop(1,    `rgba(0,0,0,${shade})`);
-            } else {
-              sg.addColorStop(0,    `rgba(0,0,0,${shade})`);
-              sg.addColorStop(0.5,  `rgba(0,0,0,${shade * 0.22})`);
-              sg.addColorStop(1,    `rgba(0,0,0,0.01)`);
-            }
-          }
-          ctx.fillStyle = sg;
-          ctx.fillRect(destX, 0, visW, PH);
-        }
-
-        /* Specular crease highlight at the fold line */
-        const spec = Math.exp(-Math.pow((angle - Math.PI / 2) * 5.5, 2)) * 0.15;
-        if (spec > 0.004) {
-          const cw  = Math.max(3, visW * 0.06);
-          const cx2 = dir === 'next' ? destX : destX + visW - cw;
-          const cg  = ctx.createLinearGradient(cx2, 0, cx2 + cw, 0);
-          cg.addColorStop(0,   'rgba(255,255,255,0)');
-          cg.addColorStop(0.5, `rgba(255,255,255,${spec})`);
-          cg.addColorStop(1,   'rgba(255,255,255,0)');
-          ctx.fillStyle = cg;
-          ctx.fillRect(cx2, 0, cw, PH);
-        }
-
-        ctx.restore();
-      }
-    }
-
-    /* 4 — Shadow cast on static page */
-    if (staticIdx >= 0) {
-      // Peak at midpoint of the real elapsed time
-      const peak  = Math.sin(raw * Math.PI);
-      const alpha = peak * 0.26;
-      if (alpha > 0.005) {
-        const sw  = PW * 0.5;
-        const sx2 = dir === 'next' ? 0 : (srcSingle ? 0 : PW);
-        const sg2 = ctx.createLinearGradient(
-          dir === 'next' ? sx2 + sw : sx2,          0,
-          dir === 'next' ? sx2      : sx2 + sw,      0
-        );
-        sg2.addColorStop(0,   'rgba(0,0,0,0.01)');
-        sg2.addColorStop(0.4, `rgba(0,0,0,${alpha * 0.5})`);
-        sg2.addColorStop(1,   `rgba(0,0,0,${alpha})`);
-        ctx.fillStyle = sg2;
-        ctx.fillRect(sx2, 0, sw, PH);
-      }
-    }
-
-    /* 5 — Spine */
-    if (!srcSingle || !dstSingle) drawSpine();
-
-    /* Done? */
-    if (raw < 1) {
-      requestAnimationFrame(frame);
+    if (!dstSingle && dstR !== -1) {
+      elImgR.src = imgSrc(dstR);
+      elStaticR.style.display = 'block';
+      elStaticR.className = 'page-static right';
+      elStaticR.style.position = 'absolute';
+      elStaticR.style.left = PW + 'px';
+      elStaticR.style.top  = '0';
+    } else if (!srcSingle) {
+      // show dst left on right side (dst is single)
+      elImgR.src = imgSrc(dstL);
+      elStaticR.style.display = 'block';
     } else {
-      curL = dstL;
-      curR = dstR;
-      render();
-      busy = false;
+      elStaticR.style.display = 'none';
+    }
+  } else {
+    // prev
+    elImgL.src = imgSrc(dstL);
+    elStaticL.style.display = 'block';
+    elStaticL.className = 'page-static left';
+
+    if (!dstSingle && dstR !== -1) {
+      elImgR.src = imgSrc(dstR);
+      elStaticR.style.display = 'block';
+      elStaticR.style.position = 'absolute';
+      elStaticR.style.left = PW + 'px';
+      elStaticR.style.top  = '0';
+    } else {
+      elStaticR.style.display = 'none';
     }
   }
 
-  requestAnimationFrame(frame);
+  // ── Position and set up the flipper ────────────────────────
+  elFlipFront.src = imgSrc(flipIdx);
+  elFlipBack.src  = imgSrc(backIdx);
+
+  // Flipper position: on top of the page that's turning
+  elFlipper.style.display   = 'block';
+  elFlipper.style.position  = 'absolute';
+  elFlipper.style.top       = '0';
+  elFlipper.style.width     = PW + 'px';
+  elFlipper.style.height    = PH + 'px';
+
+  if (dir === 'next') {
+    // Flipper covers the right-hand page (or only page if single)
+    elFlipper.style.left         = (srcSingle ? '0' : PW) + 'px';
+    elFlipper.style.transformOrigin = 'left center';
+    elFlipper.style.transform    = 'rotateY(0deg)';
+  } else {
+    // Flipper covers the left-hand page
+    elFlipper.style.left         = '0px';
+    elFlipper.style.transformOrigin = 'right center';
+    elFlipper.style.transform    = 'rotateY(0deg)';
+  }
+
+  // Remove any previous transition so we can set start position
+  elFlipper.style.transition = 'none';
+
+  // Shadow overlays on front/back faces
+  const frontEl = elFlipper.querySelector('.flipper-front');
+  const backEl  = elFlipper.querySelector('.flipper-back');
+
+  // Reset shading
+  frontEl.style.removeProperty('--shade');
+  backEl.style.removeProperty('--shade');
+
+  // Force layout reflow so transition applies
+  elFlipper.getBoundingClientRect();
+
+  // ── Animate ─────────────────────────────────────────────────
+  const DURATION = mob ? 440 : 540; // ms
+
+  // We use Web Animations API for precise control over the 3D rotation
+  const endAngle = dir === 'next' ? -180 : 180;
+
+  // Custom easing: ease-in-out with slight overshoot feel
+  const easing = 'cubic-bezier(0.645, 0.045, 0.355, 1.000)';
+
+  const anim = elFlipper.animate(
+    [
+      { transform: 'rotateY(0deg)' },
+      { transform: `rotateY(${endAngle}deg)` }
+    ],
+    {
+      duration:   DURATION,
+      easing:     easing,
+      fill:       'forwards'
+    }
+  );
+
+  // ── Shading animation (runs parallel, manual rAF) ───────────
+  // We animate gradient overlays to sell the 3D lighting.
+  // Front face: darkens as it approaches 90°, then disappears.
+  // Back face: bright at 90° (just revealed), darkens as it flattens.
+
+  const startTime   = performance.now();
+  let shadingActive = true;
+
+  function shadeFrame(now) {
+    if (!shadingActive) return;
+    const raw = Math.min((now - startTime) / DURATION, 1);
+    // angle in radians: 0 → π
+    const angle  = raw * Math.PI;
+    const cosA   = Math.cos(angle);
+    const sinA   = Math.sin(angle);
+    const front  = cosA >= 0;
+
+    // Shading intensity peaks at 90°
+    const shade  = sinA * (front ? 0.55 : 0.45);
+
+    if (front) {
+      // Front darkens toward the fold (spine side)
+      if (dir === 'next') {
+        frontEl.style.background =
+          `linear-gradient(to right, rgba(0,0,0,${shade}) 0%, rgba(0,0,0,${shade*0.15}) 50%, rgba(0,0,0,0) 100%)`;
+      } else {
+        frontEl.style.background =
+          `linear-gradient(to left, rgba(0,0,0,${shade}) 0%, rgba(0,0,0,${shade*0.15}) 50%, rgba(0,0,0,0) 100%)`;
+      }
+      backEl.style.background = 'none';
+    } else {
+      // Back face: bright near fold, darkens toward outer edge
+      const backShade = shade;
+      if (dir === 'next') {
+        backEl.style.background =
+          `linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,${backShade*0.2}) 50%, rgba(0,0,0,${backShade}) 100%)`;
+      } else {
+        backEl.style.background =
+          `linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,${backShade*0.2}) 50%, rgba(0,0,0,${backShade}) 100%)`;
+      }
+      frontEl.style.background = 'none';
+    }
+
+    // Specular highlight at the crease (peaks at exactly 90°)
+    const spec = Math.exp(-Math.pow((angle - Math.PI / 2) * 6, 2)) * 0.22;
+    if (front && spec > 0.005) {
+      const side = dir === 'next' ? 'left' : 'right';
+      const w    = Math.max(3, PW * 0.04);
+      frontEl.style.boxShadow = `inset ${dir === 'next' ? `-${w}px` : `${w}px`} 0 ${w}px rgba(255,255,255,${spec})`;
+    } else {
+      frontEl.style.boxShadow = 'none';
+      backEl.style.boxShadow  = 'none';
+    }
+
+    if (raw < 1) {
+      requestAnimationFrame(shadeFrame);
+    }
+  }
+  requestAnimationFrame(shadeFrame);
+
+  // ── On animation end ─────────────────────────────────────────
+  anim.addEventListener('finish', () => {
+    shadingActive = false;
+    frontEl.style.background = 'none';
+    backEl.style.background  = 'none';
+    frontEl.style.boxShadow  = 'none';
+    backEl.style.boxShadow   = 'none';
+
+    curL = dstL;
+    curR = dstR;
+    render();
+    busy = false;
+  });
 }
 
-/* ── Corner drag ──────────────────────────────────────────── */
+// ── Drag from corner ─────────────────────────────────────────
 let drag = null;
-const CORNER = 78;
+const CORNER = 80;
 
-function getCornerDir(cx, cy) {
-  const last = (!mobile && curR !== -1) ? curR : curL;
-  const w    = cv.width;
-  const inTop    = cy < CORNER;
-  const inBottom = cy > PH - CORNER;
-  if (cx > w - CORNER && (inTop || inBottom) && last < TOTAL - 1) return 'next';
-  if (cx < CORNER     && (inTop || inBottom) && curL > 0)          return 'prev';
+function cornerDir(x, y, w) {
+  const last = (!mob && curR !== -1) ? curR : curL;
+  const nearEdge = y < CORNER || y > PH - CORNER;
+  if (x > w - CORNER && nearEdge && last < TOTAL - 1) return 'next';
+  if (x < CORNER     && nearEdge && curL > 0)          return 'prev';
   return null;
 }
 
-function canvasPos(e) {
-  const r = cv.getBoundingClientRect();
+function bookPos(e) {
+  const r = elBook.getBoundingClientRect();
   const s = e.touches ? e.touches[0] : e;
   return { x: s.clientX - r.left, y: s.clientY - r.top };
 }
 
-cv.addEventListener('mousedown', e => {
+elBook.addEventListener('mousedown', e => {
   if (busy) return;
-  const p = canvasPos(e), d = getCornerDir(p.x, p.y);
+  const p = bookPos(e), d = cornerDir(p.x, p.y, elBook.offsetWidth);
   if (!d) return;
   drag = { dir: d, sx: p.x, cx: p.x };
-  cv.style.cursor = 'grabbing';
-});
-cv.addEventListener('touchstart', e => {
+  elBook.style.cursor = 'grabbing';
+  e.preventDefault();
+}, { passive: false });
+
+elBook.addEventListener('touchstart', e => {
   if (busy) return;
-  const p = canvasPos(e), d = getCornerDir(p.x, p.y);
+  const p = bookPos(e), d = cornerDir(p.x, p.y, elBook.offsetWidth);
   if (!d) return;
   drag = { dir: d, sx: p.x, cx: p.x };
   e.preventDefault();
 }, { passive: false });
 
 window.addEventListener('mousemove', e => {
-  if (drag) { drag.cx = canvasPos(e).x; return; }
-  const p = canvasPos(e);
-  cv.style.cursor = getCornerDir(p.x, p.y) ? 'grab' : 'default';
+  if (drag) { drag.cx = bookPos(e).x; return; }
+  const p = bookPos(e);
+  elBook.style.cursor = cornerDir(p.x, p.y, elBook.offsetWidth) ? 'grab' : 'default';
 });
+
 window.addEventListener('touchmove', e => {
   if (!drag) return;
-  drag.cx = canvasPos(e).x;
+  drag.cx = bookPos(e).x;
   e.preventDefault();
 }, { passive: false });
 
 function endDrag() {
   if (!drag) return;
   const moved = drag.dir === 'next' ? drag.sx - drag.cx : drag.cx - drag.sx;
-  cv.style.cursor = 'default';
+  elBook.style.cursor = 'default';
   if (moved > 22) flipPage(drag.dir);
   drag = null;
 }
 window.addEventListener('mouseup',  endDrag);
 window.addEventListener('touchend', endDrag);
 
-/* ── Swipe ────────────────────────────────────────────────── */
+// Swipe on mobile
 let swX = 0, swY = 0;
-cv.addEventListener('touchstart', e => {
-  swX = e.touches[0].clientX;
-  swY = e.touches[0].clientY;
+document.addEventListener('touchstart', e => {
+  swX = e.touches[0].clientX; swY = e.touches[0].clientY;
 }, { passive: true });
-cv.addEventListener('touchend', e => {
+document.addEventListener('touchend', e => {
   if (drag) return;
   const dx = e.changedTouches[0].clientX - swX;
   const dy = e.changedTouches[0].clientY - swY;
-  if (Math.abs(dx) > Math.abs(dy) * 1.1 && Math.abs(dx) > 42)
+  if (Math.abs(dx) > Math.abs(dy) * 1.2 && Math.abs(dx) > 44) {
     flipPage(dx < 0 ? 'next' : 'prev');
+  }
 }, { passive: true });
 
-/* ── Hotspots ─────────────────────────────────────────────── */
+// ── Hotspots ─────────────────────────────────────────────────
+function clearHotspots() { elHsL.innerHTML = ''; elHsR.innerHTML = ''; }
+
 function buildHotspots() {
-  const hl = document.getElementById('hl');
-  hl.innerHTML = '';
+  clearHotspots();
   if (busy) return;
 
-  const add = (pageIdx, offsetX) => {
-    (LINKS[pageIdx] || []).forEach(lk => {
-      const a       = document.createElement('a');
-      a.className   = 'hs';
-      a.href        = lk.uri;
-      a.target      = '_blank';
-      a.rel         = 'noopener noreferrer';
-      a.style.left   = (offsetX + lk.x * PW) + 'px';
-      a.style.top    = (lk.y * PH) + 'px';
-      a.style.width  = (lk.w * PW) + 'px';
-      a.style.height = (lk.h * PH) + 'px';
-      hl.appendChild(a);
+  const add = (pi, container) => {
+    (LINKS[pi] || []).forEach(lk => {
+      const a = document.createElement('a');
+      a.className = 'hs';
+      a.href      = lk.uri;
+      a.target    = '_blank';
+      a.rel       = 'noopener noreferrer';
+      a.style.left   = (lk.x * 100) + '%';
+      a.style.top    = (lk.y * 100) + '%';
+      a.style.width  = (lk.w * 100) + '%';
+      a.style.height = (lk.h * 100) + '%';
+      container.appendChild(a);
     });
   };
 
-  add(curL, 0);
-  if (!mobile && curR !== -1) add(curR, PW);
+  add(curL, elHsL);
+  if (!mob && curR !== -1) add(curR, elHsR);
 }
 
-/* ── Corner hints ─────────────────────────────────────────── */
-function updateHints() {
-  const last = (!mobile && curR !== -1) ? curR : curL;
-  document.getElementById('hR').className = 'ch br' + (last < TOTAL - 1 ? ' on' : '');
-  document.getElementById('hL').className = 'ch bl' + (curL > 0 ? ' on' : '');
+// ── Peel hints ───────────────────────────────────────────────
+function updatePeelHints() {
+  const last = (!mob && curR !== -1) ? curR : curL;
+  const showR = last < TOTAL - 1;
+  const showL = curL > 0;
+
+  if (showR && !elPeelR.innerHTML) {
+    elPeelR.innerHTML = `<svg viewBox="0 0 56 56" fill="none" width="56" height="56">
+      <defs><radialGradient id="pg1" cx="100%" cy="100%" r="100%">
+        <stop offset="0%" stop-color="#F24660" stop-opacity=".9"/>
+        <stop offset="80%" stop-color="#F24660" stop-opacity="0"/>
+      </radialGradient></defs>
+      <path d="M56 56 L14 56 Q4 56 4 46 L4 4" stroke="url(#pg1)" stroke-width="1.8"
+            stroke-dasharray="4 3.5" fill="none" stroke-linecap="round"/>
+      <polygon points="35,56 56,56 56,35" fill="rgba(242,70,96,.18)"/>
+      <circle cx="49" cy="49" r="3.5" fill="rgba(242,70,96,.85)"/>
+      <circle cx="49" cy="49" r="6"   fill="rgba(242,70,96,.14)"/>
+    </svg>`;
+  }
+  if (showL && !elPeelL.innerHTML) {
+    elPeelL.innerHTML = `<svg viewBox="0 0 56 56" fill="none" width="56" height="56">
+      <defs><radialGradient id="pg2" cx="0%" cy="100%" r="100%">
+        <stop offset="0%" stop-color="#F24660" stop-opacity=".9"/>
+        <stop offset="80%" stop-color="#F24660" stop-opacity="0"/>
+      </radialGradient></defs>
+      <path d="M0 56 L42 56 Q52 56 52 46 L52 4" stroke="url(#pg2)" stroke-width="1.8"
+            stroke-dasharray="4 3.5" fill="none" stroke-linecap="round"/>
+      <polygon points="21,56 0,56 0,35" fill="rgba(242,70,96,.18)"/>
+      <circle cx="7" cy="49" r="3.5" fill="rgba(242,70,96,.85)"/>
+      <circle cx="7" cy="49" r="6"   fill="rgba(242,70,96,.14)"/>
+    </svg>`;
+  }
+
+  elPeelR.className = 'peel-hint right' + (showR ? ' show' : '');
+  elPeelL.className = 'peel-hint left'  + (showL ? ' show' : '');
 }
 
-/* ── UI ───────────────────────────────────────────────────── */
+// ── UI ────────────────────────────────────────────────────────
 function updateUI() {
-  const last = (!mobile && curR !== -1) ? curR : curL;
-
-  let pg = `<b>${curL + 1}</b>`;
-  if (!mobile && curR !== -1) pg += `–<b>${curR + 1}</b>`;
-  pg += `<span> / ${TOTAL}</span>`;
-  document.getElementById('pgc').innerHTML = pg;
-
-  document.getElementById('btnP').disabled = curL <= 0;
-  document.getElementById('btnN').disabled = last >= TOTAL - 1;
-
+  const last = (!mob && curR !== -1) ? curR : curL;
+  const lbl = document.getElementById('pageLabel');
+  if (lbl) {
+    let t = `<b>${curL + 1}</b>`;
+    if (!mob && curR !== -1) t += `–<b>${curR + 1}</b>`;
+    t += `&thinsp;/&thinsp;${TOTAL}`;
+    lbl.innerHTML = t;
+  }
+  document.getElementById('btnPrev').disabled = curL <= 0;
+  document.getElementById('btnNext').disabled = last >= TOTAL - 1;
   document.querySelectorAll('.th').forEach((el, i) =>
-    el.classList.toggle('on', i === curL || (!mobile && i === curR))
+    el.classList.toggle('on', i === curL || (!mob && i === curR))
   );
 }
 
-/* ── Thumbnails ───────────────────────────────────────────── */
+// ── Thumbnails ────────────────────────────────────────────────
 function buildThumbs() {
-  const strip = document.getElementById('thumbs');
+  const strip = document.getElementById('thumbstrip');
   for (let i = 0; i < TOTAL; i++) {
     const d = document.createElement('div');
     d.className   = 'th';
-    d.dataset.idx = String(i);
+    d.dataset.idx = i;
     d.title       = `Página ${i + 1}`;
     d.onclick = () => {
-      checkMobile();
+      checkMob();
       setSpread(i);
       render();
       if (thumbsOpen) toggleThumbs();
     };
-    const m   = document.createElement('img');
+    const m = document.createElement('img');
     m.loading = 'lazy';
     m.alt     = `Pág ${i + 1}`;
-    m.src     = `pages/${String(i).padStart(2, '0')}.jpg`;
+    m.src     = imgSrc(i);
     d.appendChild(m);
     strip.appendChild(d);
   }
@@ -507,27 +559,25 @@ function buildThumbs() {
 
 function toggleThumbs() {
   thumbsOpen = !thumbsOpen;
-  document.getElementById('thumbs').classList.toggle('open', thumbsOpen);
+  document.getElementById('thumbstrip').classList.toggle('open', thumbsOpen);
 }
 
-/* ── Zoom ─────────────────────────────────────────────────── */
+// ── Zoom ─────────────────────────────────────────────────────
 function setZoom(v) {
   zoomLv = Math.max(0.4, Math.min(1.9, v));
   if (!busy) render();
 }
 
-/* ── Zoom overlay ─────────────────────────────────────────── */
-cv.addEventListener('dblclick', e => {
-  const p   = canvasPos(e);
-  const idx = (!mobile && curR !== -1 && p.x > PW) ? curR : curL;
-  const src = `pages/${String(idx).padStart(2, '0')}.jpg`;
-  document.getElementById('zimg').src = src;
-  document.getElementById('zov').classList.add('on');
+// ── Zoom overlay ──────────────────────────────────────────────
+elBook.addEventListener('dblclick', e => {
+  const p   = bookPos(e);
+  const idx = (!mob && curR !== -1 && p.x > PW) ? curR : curL;
+  document.getElementById('zoomImg').src = imgSrc(idx);
+  document.getElementById('zoomOverlay').classList.add('on');
 });
+window.closeZoom = () => document.getElementById('zoomOverlay').classList.remove('on');
 
-window.closeZoom = () => document.getElementById('zov').classList.remove('on');
-
-/* ── Keyboard ─────────────────────────────────────────────── */
+// ── Keyboard ─────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (['ArrowRight', ' '].includes(e.key)) { e.preventDefault(); flipPage('next'); }
   if (e.key === 'ArrowLeft')               { e.preventDefault(); flipPage('prev'); }
@@ -536,59 +586,52 @@ document.addEventListener('keydown', e => {
   if (e.key === '-')                         setZoom(zoomLv - 0.12);
 });
 
-/* ── Controls ─────────────────────────────────────────────── */
-document.getElementById('btnP').onclick  = () => flipPage('prev');
-document.getElementById('btnN').onclick  = () => flipPage('next');
-document.getElementById('btnTh').onclick = toggleThumbs;
-document.getElementById('zIn').onclick   = () => setZoom(zoomLv + 0.12);
-document.getElementById('zOut').onclick  = () => setZoom(zoomLv - 0.12);
-
-document.getElementById('btnFS').onclick = () => {
+// ── Controls ──────────────────────────────────────────────────
+document.getElementById('btnPrev').onclick   = () => flipPage('prev');
+document.getElementById('btnNext').onclick   = () => flipPage('next');
+document.getElementById('btnThumbs').onclick = toggleThumbs;
+document.getElementById('zIn').onclick       = () => setZoom(zoomLv + 0.12);
+document.getElementById('zOut').onclick      = () => setZoom(zoomLv - 0.12);
+document.getElementById('btnFS').onclick     = () => {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
   else document.exitFullscreen?.();
 };
 document.addEventListener('fullscreenchange', () => { if (!busy) render(); });
-
 window.addEventListener('resize', () => {
   if (busy) return;
-  const wasMobile = mobile;
-  checkMobile();
-  if (wasMobile !== mobile) setSpread(curL);
+  const was = mob; checkMob();
+  if (was !== mob) setSpread(curL);
   render();
 });
 
-/* ── Init ─────────────────────────────────────────────────── */
-async function init() {
-  checkMobile();
+// ── Init ──────────────────────────────────────────────────────
+(async () => {
+  checkMob();
   setSpread(0);
   buildThumbs();
 
-  // Load first 4 pages immediately
+  // Load first pages
   await Promise.all([0, 1, 2, 3].map(i => loadImg(i)));
-
   await render();
 
-  // Dismiss loading screen
+  // Hide loading
   const ld = document.getElementById('loading');
-  ld.style.opacity = '0';
-  ld.style.pointerEvents = 'none';
-  setTimeout(() => ld.remove(), 650);
-
-  // One-time tooltip
+  const fill = document.getElementById('ldFill');
+  if (fill) fill.style.width = '100%';
   setTimeout(() => {
-    const tip = document.getElementById('tip');
-    tip.classList.add('on');
-    setTimeout(() => tip.classList.remove('on'), 5000);
-  }, 800);
+    ld.style.opacity = '0';
+    ld.style.pointerEvents = 'none';
+    setTimeout(() => ld.remove(), 650);
+  }, 200);
 
-  // Pre-load rest in background
+  // Tooltip
+  setTimeout(() => {
+    const tip = document.getElementById('tooltip');
+    if (tip) { tip.classList.add('on'); setTimeout(() => tip.classList.remove('on'), 5000); }
+  }, 900);
+
+  // Load rest in background
   for (let i = 4; i < TOTAL; i++) {
     await loadImg(i);
-    const bar = document.getElementById('prebar');
-    if (bar) bar.style.width = ((i + 1) / TOTAL * 100) + '%';
   }
-  const prebg = document.getElementById('prebg');
-  if (prebg) prebg.style.opacity = '0';
-}
-
-init();
+})();
